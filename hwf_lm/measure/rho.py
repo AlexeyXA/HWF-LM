@@ -1,4 +1,7 @@
-"""Stage 1: Measure rho(ell) — integrated fit; reproducible seed per W."""
+"""Stage 1: Measure rho(ell) — integrated fit; reproducible seed per W.
+
+integrated_power_law accepts scalar or ndarray (required by scipy curve_fit).
+"""
 
 from __future__ import annotations
 
@@ -50,11 +53,22 @@ class WindowedTransformer(nn.Module):
 
 
 def integrated_power_law(W, rho_0, alpha, H_0):
-    W_int = int(round(float(W)))
-    if W_int < 1:
-        return float(H_0)
-    ls = np.arange(1, W_int + 1, dtype=np.float64)
-    return float(H_0 - rho_0 * np.sum(ls ** (-alpha)))
+    """L(W) = H_0 - rho_0 * sum_{ell=1..W} ell^{-alpha}.
+
+    Accepts scalar or array W — scipy.optimize.curve_fit passes arrays.
+    """
+    W_arr = np.asarray(W, dtype=np.float64)
+    scalar = W_arr.ndim == 0
+    W_arr = np.atleast_1d(W_arr)
+    out = np.empty_like(W_arr, dtype=np.float64)
+    for i, w in enumerate(W_arr):
+        W_int = int(round(float(w)))
+        if W_int < 1:
+            out[i] = float(H_0)
+        else:
+            ls = np.arange(1, W_int + 1, dtype=np.float64)
+            out[i] = float(H_0) - float(rho_0) * float(np.sum(ls ** (-float(alpha))))
+    return float(out[0]) if scalar else out
 
 
 def unigram_entropy_nats(ids):
@@ -117,7 +131,7 @@ def measure_rho(cfg: MeasureConfig) -> RhoResult:
     for W in tqdm(windows, desc="windows"):
         eff = 1 + cfg.num_layers * max(W - 1, 0)
         print(f"\n[W={W:3d} W_eff={eff:3d}] budget={cfg.token_budget/1e6:.1f}M")
-        torch.manual_seed(cfg.seed)  # same init for every W
+        torch.manual_seed(cfg.seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(cfg.seed)
         model = WindowedTransformer(
