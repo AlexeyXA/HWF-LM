@@ -1,0 +1,48 @@
+"""Stage 2: Compute ell_1, ell_2 and layer counts from measured rho via water-filling."""
+from __future__ import annotations
+import numpy as np
+from scipy.optimize import brentq
+from hwf_lm.config import RhoResult, HWFConfig
+
+def calculate_thresholds(
+    rho: RhoResult,
+    ssm_state: int = 64,
+    nca_k: int = 3,
+    c_S: float = 0.05,
+    c_N: float = 0.2,
+    c_A: float = 1.0,
+    max_len: int = 2048,
+    d_model: int = 256,
+    n_heads: int = 8,
+) -> HWFConfig:
+    rho_0, alpha = rho.rho_0, rho.alpha
+    def rho_fn(L: float) -> float:
+        return rho_0 * (L ** (-alpha))
+    def eq_ssm(L: float) -> float:
+        return c_S * np.exp(-L / ssm_state) - rho_fn(L)
+    def eq_attn(L: float) -> float:
+        return rho_fn(L) - c_A
+    try:
+        l1 = brentq(eq_ssm, 1.0, 1000.0)
+    except ValueError:
+        l1 = 1.0
+    try:
+        l2 = brentq(eq_attn, 1.0, float(max_len))
+    except ValueError:
+        l2 = max_len / 2.0
+    if l1 > 4 * ssm_state:
+        ssm_state = int(np.ceil(l1 / 2))
+    n_ssm = min(4, max(1, int(np.ceil(l1 / ssm_state))))
+    gap = max(0.0, l2 - l1)
+    nca_T = min(50, max(3, int(np.ceil(gap / nca_k))))
+    n_nca = min(2, max(1, int(np.ceil(gap / (nca_T * nca_k + 1e-6)))))
+    n_attn = 1 if (max_len - l2) < 100 else 2
+    print(f"ell_1 = {l1:.2f}, ell_2 = {l2:.2f}")
+    print(f"ssm_state = {ssm_state}")
+    print(f"Layers: SSM={n_ssm}, NCA={n_nca} (T={nca_T}), Attn={n_attn}")
+    return HWFConfig(
+        ell_1=int(np.ceil(l1)), ell_2=int(np.ceil(l2)),
+        ssm_state=ssm_state, nca_T=nca_T, nca_k=nca_k,
+        n_layers_per_region=(n_ssm, n_nca, n_attn),
+        d_model=d_model, n_heads=n_heads, max_len=max_len,
+    )
