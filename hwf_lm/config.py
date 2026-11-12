@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Tuple, Optional
 import json
@@ -88,11 +88,10 @@ class TrainConfig:
 
 @dataclass
 class MeasureConfig:
-    """Stage 1 measurement settings."""
     num_stories: int = 5000
-    seq_len: int = 256  # TinyStories median ~200 tokens; 512 drops most stories
+    seq_len: int = 256
     d_model: int = 128
-    num_layers: int = 1  # Stage 1: 1 layer so W = effective context
+    num_layers: int = 1
     num_heads: int = 4
     max_window: int = 128
     token_budget: int = 2_000_000
@@ -100,4 +99,5 @@ class MeasureConfig:
     lr: float = 3e-4
     windows: Tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 128)
     device: str = "cuda"
+    seed: int = 42
     output_dir: str = "outputs/stage1"

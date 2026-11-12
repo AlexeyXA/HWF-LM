@@ -21,6 +21,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--output-dir", type=str, default="outputs/stage1")
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     cfg = MeasureConfig(
@@ -34,9 +35,10 @@ def main():
         batch_size=args.batch_size,
         device=args.device,
         output_dir=args.output_dir,
+        seed=args.seed,
     )
     print(f"Stage 1 config: seq_len={cfg.seq_len} num_layers={cfg.num_layers} "
-          f"max_window={cfg.max_window} budget={cfg.token_budget}")
+          f"max_window={cfg.max_window} budget={cfg.token_budget} seed={cfg.seed}")
     result = measure_rho(cfg)
     print("\n=== SAVE THIS ===")
     print(result)
