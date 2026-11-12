@@ -1,4 +1,8 @@
-"""Stage 2 thresholds with multi-root scan; pick smallest positive SSM root."""
+"""Stage 2 thresholds with multi-root scan.
+
+For SSM, if several roots exist, use the *last* (final crossover):
+ell_1 = lag where capacity finally falls below spectral density.
+"""
 
 from __future__ import annotations
 
@@ -57,15 +61,15 @@ def calculate_thresholds(
     if not ssm_roots:
         if strict:
             raise RuntimeError(
-                f"No SSM root. c_S={c_S}, alpha={alpha}, rho_0={rho_0}. "
-                f"f(1)={eq_ssm(1):.4g}"
+                f"No SSM root. c_S={c_S}, alpha={alpha}, rho_0={rho_0}. f(1)={eq_ssm(1):.4g}"
             )
         l1 = 1.0
         print("WARNING: no SSM root, l1=1")
     else:
-        l1 = ssm_roots[0]
+        # Final crossover: capacity finally below spectrum
+        l1 = ssm_roots[-1]
         if len(ssm_roots) > 1:
-            print(f"Note: multiple SSM roots {ssm_roots}; using smallest l1={l1:.3f}")
+            print(f"Note: multiple SSM roots {ssm_roots}; using last (final crossover) l1={l1:.3f}")
 
     def first_above(fn) -> Optional[float]:
         roots = _find_roots(fn, max(l1 + 1e-3, 1.0), float(max_len), n_grid=128)
