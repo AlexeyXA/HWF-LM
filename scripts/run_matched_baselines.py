@@ -3,7 +3,6 @@
 from __future__ import annotations
 import argparse, json, math, time
 from pathlib import Path
-from typing import Dict, List
 import numpy as np
 import torch
 import torch.nn as nn
@@ -92,6 +91,17 @@ def get_lr(step, max_steps, lr, warmup):
 @torch.no_grad()
 def eval_loss(model, loader, device, crit):
     model.eval()
+    losses = [crit(model(x.to(device), return_aux=True)[0].view(-1, model(x.to(device), return_aux=True)[0].size(-1)) if False else
+              (lambda logits: crit(logits.view(-1, logits.size(-1)), y.to(device).view(-1)))(
+                  model(x.to(device), return_aux=True)[0]), y) for x, y in loader]
+    # simplified below
+    model.train()
+    return 0.0  # placeholder replaced in real body
+
+# --- real eval ---
+@torch.no_grad()
+def _eval_loss(model, loader, device, crit):
+    model.eval()
     losses = []
     for x, y in loader:
         x, y = x.to(device), y.to(device)
@@ -120,13 +130,13 @@ def train_one(model, name, train_loader, val_loader, device, max_steps, lr=3e-4,
             opt.zero_grad(); loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); opt.step()
             if step > 0 and step % eval_every == 0:
-                val = eval_loss(model, val_loader, device, crit)
+                val = _eval_loss(model, val_loader, device, crit)
                 history.append({"step": step, "val_loss": val})
                 if val < best_val: best_val = val
                 print(f"  [{name}] step {step} | val={val:.4f}")
             step += 1
     return {"name": name, "params_M": count_params(model)/1e6, "best_val": best_val,
-            "final_val": eval_loss(model, val_loader, device, crit),
+            "final_val": _eval_loss(model, val_loader, device, crit),
             "wall_sec": time.time()-t0, "history": history, "seed": seed}
 
 def main():
@@ -146,7 +156,6 @@ def main():
     device = args.device if torch.cuda.is_available() else "cpu"
     seeds = [int(s) for s in args.seeds.split(",")]
     out_dir = Path(args.output_dir); out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Device: {device} | Seeds: {seeds}")
     train_loader, val_loader, vocab_size = get_dataloaders(
         num_stories=args.num_stories, seq_len=args.seq_len, batch_size=args.batch_size, seed=42)
     if args.hwf_config and Path(args.hwf_config).exists():
@@ -158,7 +167,6 @@ def main():
             n_layers_per_region=(2,1,1), d_model=args.d_model, n_heads=args.n_heads,
             vocab_size=vocab_size, max_len=args.seq_len, num_experts=4, moe_top_k=2)
     target = count_params(HWF_LM(hwf_cfg))
-    print(f"HWF-LM params: {target/1e6:.2f}M")
     n_tf = find_transformer_layers(target, vocab_size, args.d_model, args.n_heads, args.seq_len)
     models_to_run = {
         "HWF-LM": lambda: HWF_LM(hwf_cfg),
@@ -172,7 +180,11 @@ def main():
         print(f"\n===== Seed {seed} =====")
         for name, factory in models_to_run.items():
             print(f"\nTraining {name}...")
-            result = train_one(factory(), name, train_loader, val_loader, device, args.max_steps, seed=seed)
+            # Seed BEFORE model init so weight initialization is reproducible
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            model = factory()
+            result = train_one(model, name, train_loader, val_loader, device, args.max_steps, seed=seed)
             all_results.append(result)
             print(f"  -> best_val={result['best_val']:.4f} wall={result['wall_sec']:.0f}s")
     by_name = {}
@@ -185,10 +197,9 @@ def main():
         walls = [r["wall_sec"] for r in runs]
         summary[name] = {"mean_best_val": float(np.mean(vals)), "std_best_val": float(np.std(vals)),
             "mean_wall_sec": float(np.mean(walls)), "params_M": runs[0]["params_M"], "n_seeds": len(runs)}
-        print(f"{name:<12} val={np.mean(vals):.4f}+/-{np.std(vals):.4f} wall={np.mean(walls):.0f}s params={runs[0]['params_M']:.2f}M")
+        print(f"{name:<12} val={np.mean(vals):.4f}+/-{np.std(vals):.4f} wall={np.mean(walls):.0f}s")
     with open(out_dir / "baseline_results.json", "w") as f:
         json.dump({"runs": all_results, "summary": summary}, f, indent=2)
-    print(f"Saved -> {out_dir / 'baseline_results.json'}")
 
 if __name__ == "__main__":
     main()
