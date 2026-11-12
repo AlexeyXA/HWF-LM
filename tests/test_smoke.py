@@ -19,7 +19,8 @@ def test_model_forward():
 
 def test_thresholds_success():
     rho = RhoResult(rho_0=0.5, alpha=1.3, H_0=4.5, I_inf=2.0, max_rel_residual=0.03)
-    cfg = calculate_thresholds(rho, max_len=512, c_S=2.0, c_N=0.5, c_A=0.01, strict=True)
+    # c_S=0.5 yields a real SSM sign change for this rho
+    cfg = calculate_thresholds(rho, max_len=512, c_S=0.5, c_N=0.3, c_A=0.001, strict=True)
     assert cfg.ell_2 > cfg.ell_1 >= 1
     print("OK thresholds", cfg.ell_1, cfg.ell_2)
 
