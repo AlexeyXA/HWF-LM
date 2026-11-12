@@ -6,12 +6,10 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Tuple, Optional
 import json
-import yaml
 
 
 @dataclass
 class RhoResult:
-    """Result of Stage 1 spectrum measurement."""
     rho_0: float
     alpha: float
     H_0: float
@@ -26,20 +24,17 @@ class RhoResult:
         )
 
     def save(self, path: str | Path) -> None:
-        path = Path(path)
         with open(path, "w") as f:
             json.dump(asdict(self), f, indent=2)
 
     @classmethod
     def load(cls, path: str | Path) -> "RhoResult":
         with open(path) as f:
-            data = json.load(f)
-        return cls(**data)
+            return cls(**json.load(f))
 
 
 @dataclass
 class HWFConfig:
-    """Architecture configuration produced by Stage 2."""
     ell_1: int
     ell_2: int
     ssm_state: int
@@ -58,7 +53,6 @@ class HWFConfig:
     n_global_tokens: int = 4
 
     def save(self, path: str | Path) -> None:
-        path = Path(path)
         data = asdict(self)
         data["n_layers_per_region"] = list(self.n_layers_per_region)
         with open(path, "w") as f:
@@ -74,7 +68,6 @@ class HWFConfig:
 
 @dataclass
 class TrainConfig:
-    """Training hyperparameters."""
     batch_size: int = 16
     seq_len: int = 256
     lr: float = 3e-4
@@ -97,9 +90,9 @@ class TrainConfig:
 class MeasureConfig:
     """Stage 1 measurement settings."""
     num_stories: int = 5000
-    seq_len: int = 512
+    seq_len: int = 256  # TinyStories median ~200 tokens; 512 drops most stories
     d_model: int = 128
-    num_layers: int = 2
+    num_layers: int = 1  # Stage 1: 1 layer so W = effective context
     num_heads: int = 4
     max_window: int = 128
     token_budget: int = 2_000_000
@@ -108,10 +101,3 @@ class MeasureConfig:
     windows: Tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 128)
     device: str = "cuda"
     output_dir: str = "outputs/stage1"
-
-
-def save_yaml(obj, path: str | Path) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        yaml.dump(asdict(obj) if hasattr(obj, "__dataclass_fields__") else obj, f, default_flow_style=False)
