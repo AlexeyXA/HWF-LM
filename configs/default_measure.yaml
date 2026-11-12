@@ -1,0 +1,12 @@
+num_stories: 5000
+seq_len: 512
+d_model: 128
+num_layers: 2
+num_heads: 4
+max_window: 128
+token_budget: 2000000
+batch_size: 16
+lr: 0.0003
+windows: [1, 2, 4, 8, 16, 32, 64, 128]
+device: cuda
+output_dir: outputs/stage1
