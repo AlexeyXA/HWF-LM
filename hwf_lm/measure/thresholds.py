@@ -1,10 +1,30 @@
-"""Stage 2: ell_1, ell_2 from measured rho. Uses c_S, c_N, c_A. Missing roots raise."""
+"""Stage 2 thresholds with multi-root scan; pick smallest positive SSM root."""
 
 from __future__ import annotations
 
 import numpy as np
 from scipy.optimize import brentq
+from typing import List, Optional
 from hwf_lm.config import RhoResult, HWFConfig
+
+
+def _find_roots(fn, lo: float, hi: float, n_grid: int = 64) -> List[float]:
+    xs = np.linspace(lo, hi, n_grid)
+    ys = np.array([fn(float(x)) for x in xs])
+    roots = []
+    for i in range(len(xs) - 1):
+        if ys[i] == 0:
+            roots.append(float(xs[i]))
+        elif ys[i] * ys[i + 1] < 0:
+            try:
+                roots.append(float(brentq(fn, float(xs[i]), float(xs[i + 1]))))
+            except ValueError:
+                pass
+    cleaned = []
+    for r in sorted(roots):
+        if not cleaned or abs(r - cleaned[-1]) > 1e-3:
+            cleaned.append(r)
+    return cleaned
 
 
 def calculate_thresholds(
@@ -33,24 +53,32 @@ def calculate_thresholds(
     def eq_attn(L: float) -> float:
         return rho_fn(L) - c_A
 
-    def solve(fn, lo, hi, name: str) -> float:
-        try:
-            if fn(lo) * fn(hi) > 0:
-                raise ValueError(f"no sign change on [{lo},{hi}]")
-            return float(brentq(fn, lo, hi))
-        except Exception as e:
-            if strict:
-                raise RuntimeError(
-                    f"No root for {name}: {e}. Check c_S={c_S}, c_N={c_N}, c_A={c_A}, alpha={alpha}."
-                ) from e
-            print(f"WARNING: no root for {name}, heuristic")
-            return lo if "ell_1" in name else (lo + hi) / 2
+    ssm_roots = _find_roots(eq_ssm, 1.0, min(2000.0, float(max_len)), n_grid=128)
+    if not ssm_roots:
+        if strict:
+            raise RuntimeError(
+                f"No SSM root. c_S={c_S}, alpha={alpha}, rho_0={rho_0}. "
+                f"f(1)={eq_ssm(1):.4g}"
+            )
+        l1 = 1.0
+        print("WARNING: no SSM root, l1=1")
+    else:
+        l1 = ssm_roots[0]
+        if len(ssm_roots) > 1:
+            print(f"Note: multiple SSM roots {ssm_roots}; using smallest l1={l1:.3f}")
 
-    l1 = solve(eq_ssm, 1.0, min(1000.0, float(max_len)), "ell_1 (SSM)")
-    try:
-        l2 = solve(eq_nca, max(l1 + 1e-3, 1.0), float(max_len), "ell_2 (NCA)")
-    except RuntimeError:
-        l2 = solve(eq_attn, max(l1 + 1e-3, 1.0), float(max_len), "ell_2 (Attn fallback)")
+    def first_above(fn) -> Optional[float]:
+        roots = _find_roots(fn, max(l1 + 1e-3, 1.0), float(max_len), n_grid=128)
+        return roots[0] if roots else None
+
+    l2 = first_above(eq_nca)
+    if l2 is None:
+        l2 = first_above(eq_attn)
+    if l2 is None:
+        if strict:
+            raise RuntimeError(f"No ell_2 root above l1={l1:.3f}. c_N={c_N}, c_A={c_A}")
+        l2 = min(float(max_len), l1 * 2 + 1)
+        print(f"WARNING: no ell_2 root, heuristic l2={l2}")
 
     if l2 <= l1:
         if strict:
