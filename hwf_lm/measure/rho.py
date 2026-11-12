@@ -1,7 +1,4 @@
-"""Stage 1: Measure rho(ell) — integrated fit; reproducible seed per W.
-
-integrated_power_law accepts scalar or ndarray (required by scipy curve_fit).
-"""
+"""Stage 1: Measure rho(ell) — integrated fit; paired W runs; token-weighted val CE."""
 
 from __future__ import annotations
 
@@ -53,10 +50,7 @@ class WindowedTransformer(nn.Module):
 
 
 def integrated_power_law(W, rho_0, alpha, H_0):
-    """L(W) = H_0 - rho_0 * sum_{ell=1..W} ell^{-alpha}.
-
-    Accepts scalar or array W — scipy.optimize.curve_fit passes arrays.
-    """
+    """L(W) = H_0 - rho_0 * sum_{ell=1..W} ell^{-alpha}. Scalar or ndarray."""
     W_arr = np.asarray(W, dtype=np.float64)
     scalar = W_arr.ndim == 0
     W_arr = np.atleast_1d(W_arr)
@@ -79,8 +73,9 @@ def unigram_entropy_nats(ids):
 
 
 def train_window_model(model, train_loader, val_loader, device, token_budget, lr=3e-4):
+    """Train up to token_budget; return token-weighted mean val CE (nats)."""
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
-    crit = nn.CrossEntropyLoss()
+    crit_sum = nn.CrossEntropyLoss(reduction="sum")
     model.train()
     tokens_seen = 0
     while tokens_seen < token_budget:
@@ -89,19 +84,24 @@ def train_window_model(model, train_loader, val_loader, device, token_budget, lr
                 break
             x, y = x.to(device), y.to(device)
             logits = model(x)
-            loss = crit(logits.view(-1, logits.size(-1)), y.view(-1))
+            loss = crit_sum(logits.view(-1, logits.size(-1)), y.view(-1)) / y.numel()
             opt.zero_grad()
             loss.backward()
             opt.step()
-            tokens_seen += x.numel()
+            tokens_seen += int(y.numel())
     model.eval()
-    losses = []
+    total_loss = 0.0
+    total_tok = 0
     with torch.no_grad():
         for x, y in val_loader:
             x, y = x.to(device), y.to(device)
             logits = model(x)
-            losses.append(crit(logits.view(-1, logits.size(-1)), y.view(-1)).item())
-    return float(np.mean(losses))
+            n = int(y.numel())
+            total_loss += float(crit_sum(logits.view(-1, logits.size(-1)), y.view(-1)).item())
+            total_tok += n
+    if total_tok == 0:
+        return float("nan")
+    return total_loss / total_tok
 
 
 def measure_rho(cfg: MeasureConfig) -> RhoResult:
@@ -123,7 +123,8 @@ def measure_rho(cfg: MeasureConfig) -> RhoResult:
     H_0 = unigram_entropy_nats(all_ids)
     print(f"H_0 (nats) = {H_0:.4f}")
 
-    train_loader = make_dataloader(train_w, cfg.batch_size, shuffle=True)
+    # shuffle=False: identical minibatch order for every W (paired comparison)
+    train_loader = make_dataloader(train_w, cfg.batch_size, shuffle=False)
     val_loader = make_dataloader(val_w, cfg.batch_size, shuffle=False, drop_last=False)
 
     windows = [w for w in cfg.windows if w <= cfg.max_window]
@@ -165,7 +166,7 @@ def measure_rho(cfg: MeasureConfig) -> RhoResult:
         raise ValueError(f"Invalid fit: rho_0={rho_0}, alpha={alpha}")
 
     I_inf = float(rho_0 * zeta(alpha))
-    pred = np.array([integrated_power_law(W, rho_0, alpha, H_0) for W in windows])
+    pred = np.asarray(integrated_power_law(np.array(windows, dtype=float), rho_0, alpha, H_0), dtype=float)
     residuals = np.array(losses) - pred
     max_rel = float(np.abs(residuals / (np.array(losses) + 1e-12)).max())
 
@@ -214,6 +215,8 @@ def measure_rho(cfg: MeasureConfig) -> RhoResult:
             "windows": list(windows),
             "batch_size": cfg.batch_size,
             "device": device,
+            "train_shuffle": False,
+            "val_loss": "token_weighted",
         },
         "fit": {
             "rho_0": result.rho_0,
