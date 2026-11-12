@@ -1,14 +1,12 @@
-"""Stage 1: Measure rho(ell) — integrated fit; window W = causal positions.
-
-Mask: allowed = (diff >= 0) & (diff < W)
-Effective context with L layers: W_eff = 1 + L*(W-1)
-Prefer L=1 so nominal W == effective context.
-"""
+"""Stage 1: Measure rho(ell) — integrated fit; reproducible seed per W."""
 
 from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
+import json
+import random
+import subprocess
 
 import numpy as np
 import torch
@@ -41,7 +39,7 @@ class WindowedTransformer(nn.Module):
         idx = torch.arange(N, device=device)
         diff = idx.unsqueeze(1) - idx.unsqueeze(0)
         allowed = (diff >= 0) & (diff < self.window_size)
-        return ~allowed  # TransformerEncoder: True = blocked
+        return ~allowed
 
     def forward(self, x):
         B, N = x.shape
@@ -95,12 +93,17 @@ def train_window_model(model, train_loader, val_loader, device, token_budget, lr
 def measure_rho(cfg: MeasureConfig) -> RhoResult:
     device = cfg.device if torch.cuda.is_available() else "cpu"
     print(f"Stage 1 on {device}")
+    random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    torch.manual_seed(cfg.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(cfg.seed)
+    print(f"seed={cfg.seed}")
     if cfg.num_layers != 1:
-        print(f"WARNING: num_layers={cfg.num_layers} => W_eff = 1+L*(W-1); prefer L=1 for Stage 1")
-        print("  Fitting still uses nominal W; set num_layers=1 or pass effective windows.")
+        print(f"WARNING: num_layers={cfg.num_layers} => W_eff = 1+L*(W-1); prefer L=1")
 
     train_w, val_w, vocab_size = load_tinystories_tokens(
-        num_stories=cfg.num_stories, seq_len=cfg.seq_len, seed=42
+        num_stories=cfg.num_stories, seq_len=cfg.seq_len, seed=cfg.seed
     )
     all_ids = np.concatenate([train_w.reshape(-1), val_w.reshape(-1)])
     H_0 = unigram_entropy_nats(all_ids)
@@ -114,6 +117,9 @@ def measure_rho(cfg: MeasureConfig) -> RhoResult:
     for W in tqdm(windows, desc="windows"):
         eff = 1 + cfg.num_layers * max(W - 1, 0)
         print(f"\n[W={W:3d} W_eff={eff:3d}] budget={cfg.token_budget/1e6:.1f}M")
+        torch.manual_seed(cfg.seed)  # same init for every W
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(cfg.seed)
         model = WindowedTransformer(
             vocab_size, cfg.d_model, cfg.num_layers, cfg.num_heads,
             window_size=W, max_len=cfg.seq_len,
@@ -171,6 +177,49 @@ def measure_rho(cfg: MeasureConfig) -> RhoResult:
     axes[1].axhline(-5, color="red", ls="--", alpha=0.5)
     axes[1].set_xticks(range(len(windows))); axes[1].set_xticklabels([str(w) for w in windows])
     plt.tight_layout(); plt.savefig(out_dir / "rho_fit.png", dpi=150); plt.close()
+
+    git_commit = "unknown"
+    try:
+        git_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except Exception:
+        pass
+
+    detail = {
+        "git_commit": git_commit,
+        "seed": cfg.seed,
+        "config": {
+            "num_stories": cfg.num_stories,
+            "seq_len": cfg.seq_len,
+            "d_model": cfg.d_model,
+            "num_layers": cfg.num_layers,
+            "num_heads": cfg.num_heads,
+            "token_budget": cfg.token_budget,
+            "max_window": cfg.max_window,
+            "windows": list(windows),
+            "batch_size": cfg.batch_size,
+            "device": device,
+        },
+        "fit": {
+            "rho_0": result.rho_0,
+            "alpha": result.alpha,
+            "H_0": result.H_0,
+            "I_inf": result.I_inf,
+            "max_rel_residual": result.max_rel_residual,
+            "applicable": result.is_applicable(),
+        },
+        "per_window": {
+            "W": list(windows),
+            "val_ce_nats": [float(x) for x in losses],
+            "pred_ce_nats": [float(x) for x in pred],
+            "residual_abs": [float(x) for x in residuals],
+            "residual_rel": [float(r / (l + 1e-12)) for r, l in zip(residuals, losses)],
+        },
+    }
     result.save(out_dir / "rho_result.json")
-    print(f"Saved -> {out_dir}")
+    with open(out_dir / "h1_detail.json", "w") as f:
+        json.dump(detail, f, indent=2)
+    print(f"Saved -> {out_dir}/rho_result.json, h1_detail.json, rho_fit.png")
+    print(f"git_commit={git_commit} seed={cfg.seed}")
     return result
