@@ -1,18 +1,15 @@
-"""Stage 1: Measure rho(ell) via hard-window Transformers + INTEGRATED power-law fit.
+"""Stage 1: Measure rho(ell) — integrated fit; window W = number of causal positions.
 
-Correct model:
-  rho(ell) = rho_0 * ell^{-alpha}
-  L(W) = H_0 - rho_0 * sum_{ell=1}^{W} ell^{-alpha}
-  I_inf = rho_0 * zeta(alpha)
-
-Do NOT fit residual ~ W^{-beta} and treat beta as alpha (beta = alpha - 1).
+Mask: allowed = (diff >= 0) & (diff < W)
+  W=1 -> only self
+  W=2 -> self + 1 past
+Matches L(W) = H_0 - rho_0 * sum_{ell=1}^{W} ell^{-alpha} with W as context budget.
 """
 
 from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
-from typing import List, Tuple
 
 import numpy as np
 import torch
@@ -27,8 +24,6 @@ from hwf_lm.data import make_dataloader, load_tinystories_tokens
 
 
 class WindowedTransformer(nn.Module):
-    """Causal Transformer with hard attention window W. Prefer num_layers=1 so W = effective context."""
-
     def __init__(self, vocab_size, d_model, n_layers, n_heads, window_size, max_len, dropout=0.1):
         super().__init__()
         self.window_size = window_size
@@ -45,9 +40,10 @@ class WindowedTransformer(nn.Module):
 
     def _make_mask(self, N, device):
         # TransformerEncoder: True = blocked
+        # W = number of allowed causal positions (self + W-1 past)
         idx = torch.arange(N, device=device)
         diff = idx.unsqueeze(1) - idx.unsqueeze(0)
-        allowed = (diff >= 0) & (diff <= self.window_size)
+        allowed = (diff >= 0) & (diff < self.window_size)
         return ~allowed
 
     def forward(self, x):
@@ -59,7 +55,6 @@ class WindowedTransformer(nn.Module):
 
 
 def integrated_power_law(W, rho_0, alpha, H_0):
-    """L(W) = H_0 - rho_0 * sum_{ell=1..W} ell^{-alpha}"""
     W_int = int(round(float(W)))
     if W_int < 1:
         return float(H_0)
@@ -105,7 +100,6 @@ def measure_rho(cfg: MeasureConfig) -> RhoResult:
     print(f"Stage 1 on {device}")
     if cfg.num_layers != 1:
         print(f"WARNING: num_layers={cfg.num_layers} => effective context up to ~{cfg.num_layers}*W")
-        print("  Prefer num_layers=1 so axis W is the true context length.")
 
     train_w, val_w, vocab_size = load_tinystories_tokens(
         num_stories=cfg.num_stories, seq_len=cfg.seq_len, seed=42
@@ -135,7 +129,6 @@ def measure_rho(cfg: MeasureConfig) -> RhoResult:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    # INTEGRATED fit (not residual power-law)
     try:
         popt, _ = curve_fit(
             lambda W, r, a: integrated_power_law(W, r, a, H_0),
@@ -161,43 +154,25 @@ def measure_rho(cfg: MeasureConfig) -> RhoResult:
     result = RhoResult(
         rho_0=rho_0, alpha=alpha, H_0=float(H_0), I_inf=I_inf, max_rel_residual=max_rel
     )
-
     print("\n=== RESULTS (integrated fit) ===")
-    print(f"  H_0     = {result.H_0:.4f} nats")
-    print(f"  rho_0   = {result.rho_0:.4f}")
-    print(f"  alpha   = {result.alpha:.4f}")
-    print(f"  I_inf   = {result.I_inf:.4f} nats  (= rho_0 * zeta(alpha))")
-    print(f"  max |residual| = {max_rel * 100:.2f}%")
-    print("Applicable:" , result.is_applicable())
+    print(f"  H_0={result.H_0:.4f} nats  rho_0={result.rho_0:.4f}  alpha={result.alpha:.4f}")
+    print(f"  I_inf={result.I_inf:.4f} nats  max|res|={max_rel*100:.2f}%")
+    print("Applicable:", result.is_applicable())
 
     out_dir = Path(cfg.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    ax = axes[0]
-    ax.scatter(windows, losses, s=60, zorder=3, label="measured L(W)")
+    axes[0].scatter(windows, losses, s=60, zorder=3, label="measured")
     Wg = np.linspace(max(1, min(windows)), max(windows), 200)
-    ax.plot(Wg, [integrated_power_law(w, rho_0, alpha, H_0) for w in Wg], "r-",
-            label=f"integrated fit alpha={alpha:.3f}")
-    ax.axhline(H_0, color="gray", ls="--", label=f"H_0={H_0:.3f}")
-    ax.set_xlabel("W (layer window; eff~W*num_layers)")
-    ax.set_ylabel("val CE (nats)")
-    ax.legend()
-    ax.grid(alpha=0.3)
-
-    ax = axes[1]
-    ax.bar(range(len(windows)), (residuals / (np.array(losses) + 1e-12)) * 100, color="C3")
-    ax.axhline(0, color="k")
-    ax.axhline(5, color="red", ls="--", alpha=0.5)
-    ax.axhline(-5, color="red", ls="--", alpha=0.5)
-    ax.set_xticks(range(len(windows)))
-    ax.set_xticklabels([str(w) for w in windows])
-    ax.set_ylabel("relative residual %")
-    ax.set_title("Residuals")
-    plt.tight_layout()
-    plt.savefig(out_dir / "rho_fit.png", dpi=150)
-    plt.close()
-
+    axes[0].plot(Wg, [integrated_power_law(w, rho_0, alpha, H_0) for w in Wg], "r-",
+                 label=f"fit alpha={alpha:.3f}")
+    axes[0].axhline(H_0, color="gray", ls="--")
+    axes[0].set_xlabel("W"); axes[0].set_ylabel("val CE (nats)"); axes[0].legend(); axes[0].grid(alpha=0.3)
+    axes[1].bar(range(len(windows)), (residuals / (np.array(losses) + 1e-12)) * 100, color="C3")
+    axes[1].axhline(0, color="k"); axes[1].axhline(5, color="red", ls="--", alpha=0.5)
+    axes[1].axhline(-5, color="red", ls="--", alpha=0.5)
+    axes[1].set_xticks(range(len(windows))); axes[1].set_xticklabels([str(w) for w in windows])
+    plt.tight_layout(); plt.savefig(out_dir / "rho_fit.png", dpi=150); plt.close()
     result.save(out_dir / "rho_result.json")
-    print(f"Saved -> {out_dir / 'rho_result.json'}, {out_dir / 'rho_fit.png'}")
+    print(f"Saved -> {out_dir}")
     return result
