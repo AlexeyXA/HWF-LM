@@ -1,9 +1,8 @@
-"""Stage 1: Measure rho(ell) — integrated fit; window W = number of causal positions.
+"""Stage 1: Measure rho(ell) — integrated fit; window W = causal positions.
 
 Mask: allowed = (diff >= 0) & (diff < W)
-  W=1 -> only self
-  W=2 -> self + 1 past
-Matches L(W) = H_0 - rho_0 * sum_{ell=1}^{W} ell^{-alpha} with W as context budget.
+Effective context with L layers: W_eff = 1 + L*(W-1)
+Prefer L=1 so nominal W == effective context.
 """
 
 from __future__ import annotations
@@ -39,12 +38,10 @@ class WindowedTransformer(nn.Module):
         self.lm_head.weight = self.emb.weight
 
     def _make_mask(self, N, device):
-        # TransformerEncoder: True = blocked
-        # W = number of allowed causal positions (self + W-1 past)
         idx = torch.arange(N, device=device)
         diff = idx.unsqueeze(1) - idx.unsqueeze(0)
         allowed = (diff >= 0) & (diff < self.window_size)
-        return ~allowed
+        return ~allowed  # TransformerEncoder: True = blocked
 
     def forward(self, x):
         B, N = x.shape
@@ -62,7 +59,7 @@ def integrated_power_law(W, rho_0, alpha, H_0):
     return float(H_0 - rho_0 * np.sum(ls ** (-alpha)))
 
 
-def unigram_entropy_nats(ids: np.ndarray) -> float:
+def unigram_entropy_nats(ids):
     counts = Counter(ids.tolist())
     total = sum(counts.values())
     probs = np.array([c / total for c in counts.values()])
@@ -99,7 +96,8 @@ def measure_rho(cfg: MeasureConfig) -> RhoResult:
     device = cfg.device if torch.cuda.is_available() else "cpu"
     print(f"Stage 1 on {device}")
     if cfg.num_layers != 1:
-        print(f"WARNING: num_layers={cfg.num_layers} => effective context up to ~{cfg.num_layers}*W")
+        print(f"WARNING: num_layers={cfg.num_layers} => W_eff = 1+L*(W-1); prefer L=1 for Stage 1")
+        print("  Fitting still uses nominal W; set num_layers=1 or pass effective windows.")
 
     train_w, val_w, vocab_size = load_tinystories_tokens(
         num_stories=cfg.num_stories, seq_len=cfg.seq_len, seed=42
@@ -114,8 +112,8 @@ def measure_rho(cfg: MeasureConfig) -> RhoResult:
     windows = [w for w in cfg.windows if w <= cfg.max_window]
     losses = []
     for W in tqdm(windows, desc="windows"):
-        eff = W * cfg.num_layers
-        print(f"\n[W={W:3d} eff~{eff:3d}] budget={cfg.token_budget/1e6:.1f}M")
+        eff = 1 + cfg.num_layers * max(W - 1, 0)
+        print(f"\n[W={W:3d} W_eff={eff:3d}] budget={cfg.token_budget/1e6:.1f}M")
         model = WindowedTransformer(
             vocab_size, cfg.d_model, cfg.num_layers, cfg.num_heads,
             window_size=W, max_len=cfg.seq_len,
